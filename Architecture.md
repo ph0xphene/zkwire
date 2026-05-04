@@ -1,11 +1,11 @@
-# ZkForge Architecture
+# ZkWire Architecture
 
 A short tour of the internals. Read this if you intend to extend the parser, add support for a new ZK framework, or understand why the public API looks the way it does.
 
 ## Design goals
 
 1. **Zero modifications to `halo2_proofs`.** The crate must work against unmodified upstream so it can be adopted by teams who can't tolerate a fork in their dependency graph.
-2. **No private-field access.** `MockProver::instance()` and `VerifyFailure`'s fields are `pub(crate)`. Accessing them via `unsafe` transmute or shim crates would tie ZkForge to a specific halo2 binary layout. We refuse that path.
+2. **No private-field access.** `MockProver::instance()` and `VerifyFailure`'s fields are `pub(crate)`. Accessing them via `unsafe` transmute or shim crates would tie ZkWire to a specific halo2 binary layout. We refuse that path.
 3. **Source-level traceback.** A diagnostic that says "permutation failed at offset 1 in region `mul`" is barely better than the raw dump. The diagnostic must point back at the *Rust line* that wrote the bad value.
 
 These three goals constrain almost every implementation choice below.
@@ -15,7 +15,7 @@ These three goals constrain almost every implementation choice below.
 ```
 src/
 ├── lib.rs        — re-exports; defines the public surface
-├── tracker.rs    — ZkForgeTracker, AssignSite, ZkDebug trait, zk_assign! macro
+├── tracker.rs    — ZkWireTracker, AssignSite, ZkDebug trait, zkwire_assign! macro
 ├── parser.rs    — VerifyFailure → ZkReport (regex + brace-balanced slicing)
 ├── report.rs    — ZkReport, ErrorType, Location data types
 ├── reporter.rs  — Cargo-style colorized output (forge_trace)
@@ -88,11 +88,11 @@ fn detect_error_type(raw: &str) -> ErrorType {
 }
 ```
 
-This is the only place where ZkForge classifies one halo2 variant into two ZkForge variants. The split is justified by the very different remediation advice each case requires.
+This is the only place where ZkWire classifies one halo2 variant into two ZkWire variants. The split is justified by the very different remediation advice each case requires.
 
 ## Shadow mapping
 
-The `ZkForgeTracker` mirrors halo2's internal cell layout in a small `HashMap`, indexed by a key the parser can reconstruct from the failure dump:
+The `ZkWireTracker` mirrors halo2's internal cell layout in a small `HashMap`, indexed by a key the parser can reconstruct from the failure dump:
 
 ```rust
 #[derive(Hash, Eq, PartialEq)]
@@ -106,27 +106,27 @@ struct AssignSite {
     region: String,
     offset: usize,
     column_index: usize,
-    cell_name: String,
+    column_name: String,
     file: &'static str,
     line: u32,
 }
 ```
 
-The `zk_assign!` macro inserts one `AssignSite` per call. The parser, on extracting `(region, offset, column_index)` from a `VerifyFailure`, performs an `O(1)` lookup against this shadow map. If a hit is found, the report acquires an `origin: AssignSite` and the reporter renders a `= note:` line pointing at `file:line`.
+The `zkwire_assign!` macro inserts one `AssignSite` per call. The parser, on extracting `(region, offset, column_index)` from a `VerifyFailure`, performs an `O(1)` lookup against this shadow map. If a hit is found, the report acquires an `origin: AssignSite` and the reporter renders a `= note:` line pointing at `file:line`.
 
 The same column-index reflection trick (`format!("{:?}", column)` → parse `index:`) is used in the macro because halo2 0.3.2 demoted `Column::index()` to `pub(crate)`. Consistent with our "no private API" stance.
 
 ### Why a thread-local?
 
-Halo2 chips often live in library crates that don't know about ZkForge. Threading a `&ZkForgeTracker` through every chip method would force tracker-awareness into chip APIs we don't own.
+Halo2 chips often live in library crates that don't know about ZkWire. Threading a `&ZkWireTracker` through every chip method would force tracker-awareness into chip APIs we don't own.
 
-Instead, `ZkForgeTracker::install(&tracker)` stores an `Arc<ZkForgeTracker>` in a `thread_local!` cell and returns a `TrackerGuard`. The macro reads the thread-local; if no tracker is installed, the macro is a no-op (one thread-local read, one `Option::None` branch). The `TrackerGuard` restores the previous tracker on drop, so nested installations compose.
+Instead, `ZkWireTracker::install(&tracker)` stores an `Arc<ZkWireTracker>` in a `thread_local!` cell and returns a `TrackerGuard`. The macro reads the thread-local; if no tracker is installed, the macro is a no-op (one thread-local read, one `Option::None` branch). The `TrackerGuard` restores the previous tracker on drop, so nested installations compose.
 
-This is the same pattern that `tracing` uses for its current-subscriber dispatch. The contract: `MockProver::run` synthesizes on the calling thread, so the thread-local is visible to every `zk_assign!` invocation made during synthesis.
+This is the same pattern that `tracing` uses for its current-subscriber dispatch. The contract: `MockProver::run` synthesizes on the calling thread, so the thread-local is visible to every `zkwire_assign!` invocation made during synthesis.
 
 ## The reporter
 
-`forge_trace(&[VerifyFailure], &ZkForgeTracker)` is the single entry point. It:
+`forge_trace(&[VerifyFailure], &ZkWireTracker)` is the single entry point. It:
 
 1. Pulls public inputs from the tracker (recorded by `tracker.record_public_inputs(&inputs)`) and renders them as `decimal (raw_hex)`.
 2. Calls `parse_failure` once per failure to produce a `ZkReport`.

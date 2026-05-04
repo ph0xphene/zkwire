@@ -1,8 +1,8 @@
-# ZkForge
+# ZkWire
 
 A debugging layer for Halo2 circuits. Maps cryptic `VerifyFailure` dumps to `file:line` traces in your Rust source, decodes 256-bit field elements to integers, and renders the result like a Cargo error.
 
-`gdb` is to a segfault as ZkForge is to a `Permutation` failure.
+`gdb` is to a segfault as ZkWire is to a `Permutation` failure.
 
 > **Status**: alpha. Public API is stable for the patterns documented below; internals may shift before 0.2.
 
@@ -33,9 +33,9 @@ For a `ConstraintNotSatisfied`, every `cell_values` field is a 64-character hex 
 
 `MockProver` makes it worse: `instance()` is `pub(crate)`, `VerifyFailure`'s fields are private, and patching halo2 means forking a critical dependency. There is no supported way to extract context.
 
-ZkForge solves all three problems:
+ZkWire solves all three problems:
 
-- **Origin tracking** — the `zk_assign!` macro records `(file!(), line!())` at every cell assignment. When verification fails, the report points at the exact line where the offending value was written. A stack trace, but for advice columns.
+- **Origin tracking** — the `zkwire_assign!` macro records `(file!(), line!())` at every cell assignment. When verification fails, the report points at the exact line where the offending value was written. A stack trace, but for advice columns.
 - **Field-element decoding** — `BigUint`-backed conversion turns `0x00…03e7` into `999`. Works for Pasta `Fp`, BN-254 `Fr`, Goldilocks, or any `F: Debug`. No `u128` truncation.
 - **Non-invasive** — everything goes through `format!("{:#?}", failure)`. No fork of `halo2_proofs`, no private fields, no `unsafe`.
 
@@ -60,7 +60,7 @@ ZkForge solves all three problems:
 
 ```text
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ZkForge   2 circuit failures detected
+ ZkWire   2 circuit failures detected
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
  public inputs (as passed to MockProver)
@@ -88,20 +88,20 @@ The `= note:` line is rust-compiler-style. Most modern terminals (iTerm2, WezTer
 
 ```toml
 [dependencies]
-zk-debug = "0.1"
+zkwire = "0.1"
 halo2_proofs = "0.3"
 ```
 
 ## Quick start
 
-Three lines wire ZkForge into an existing test:
+Three lines wire ZkWire into an existing test:
 
 ```rust
 use std::sync::Arc;
-use zk_debug::{ZkDebug, ZkForgeTracker};
+use zkwire::{ZkDebug, ZkWireTracker};
 
-let tracker = Arc::new(ZkForgeTracker::new());
-let _guard = ZkForgeTracker::install(&tracker);          // RAII; uninstalls on drop
+let tracker = Arc::new(ZkWireTracker::new());
+let _guard = ZkWireTracker::install(&tracker);           // RAII; uninstalls on drop
 tracker.record_public_inputs(&public_inputs);
 
 let prover = MockProver::run(k, &circuit, vec![public_inputs.clone()]).unwrap();
@@ -112,10 +112,10 @@ That's it. Existing circuits get readable diagnostics without any structural cha
 
 ## Tracking origins
 
-To map failures back to source lines, swap `region.assign_advice(...)` for `zk_assign!`:
+To map failures back to source lines, swap `region.assign_advice(...)` for `zkwire_assign!`:
 
 ```rust
-use zk_debug::zk_assign;
+use zkwire::zkwire_assign;
 
 layouter.assign_region(
     || "mul",
@@ -127,10 +127,10 @@ layouter.assign_region(
 
         let value = a.value().copied() * b.value();
 
-        zk_assign!(
+        zkwire_assign!(
             region,           // &mut Region
             "mul",            // region name (must match the assign_region label)
-            "lhs * rhs",      // cell annotation
+            "lhs * rhs",      // assignment annotation
             advice[0],        // Column<Advice>
             1,                // offset within the region
             value             // Value<F>
@@ -139,12 +139,12 @@ layouter.assign_region(
 )
 ```
 
-When verification fails on a cell linked to that assignment, the report's `= note:` points back at the `zk_assign!` call site. The macro is a transparent wrapper — when no tracker is installed, it is a single thread-local read followed by an early return.
+When verification fails on a cell linked to that assignment, the report's `= note:` points back at the `zkwire_assign!` call site. The macro is a transparent wrapper — when no tracker is installed, it is a single thread-local read followed by an early return.
 
 ## Features
 
-- **RAII tracker installation** — `ZkForgeTracker::install` returns a `TrackerGuard` keyed on a thread-local. Drop the guard, the tracker uninstalls. Safe across nested scopes and parallel test runs.
-- **Near-zero overhead when uninstalled** — production builds that don't install a tracker pay one thread-local read per `zk_assign!`. No global state, no allocation.
+- **RAII tracker installation** — `ZkWireTracker::install` returns a `TrackerGuard` keyed on a thread-local. Drop the guard, the tracker uninstalls. Safe across nested scopes and parallel test runs.
+- **Near-zero overhead when uninstalled** — production builds that don't install a tracker pay one thread-local read per `zkwire_assign!`. No global state, no allocation.
 - **Field-agnostic hex decoding** — `BigUint` (no `u128` truncation). Field elements up to 256 bits — Pasta, BN-254, Goldilocks — all decode the same way.
 - **Double-anchored parser** — brace-balanced slicing isolates the `cell_values: [ … ]` block; regex extraction runs *inside* that slice. Prevents cross-contamination from unrelated `name:` fields elsewhere in the dump. See [Architecture.md](Architecture.md).
 - **Cargo-style diagnostics** — `error[NN]`, `-->` location lines, `= note:` for source origin, `= help:` for actionable guidance. Color via the `colored` crate.
