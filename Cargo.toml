@@ -1,0 +1,21 @@
+[package]
+name = "zkwire"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "zkwire"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zkwire"
+path = "src/main.rs"
+
+[dependencies]
+halo2_proofs = "0.3.0"
+group = "0.13"
+regex = "1"
+colored = "2"
+num-bigint = "0.4"
+lazy_static = "1"
+ff = "0.13"
