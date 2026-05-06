@@ -6,6 +6,7 @@
 
 use halo2_proofs::dev::VerifyFailure;
 use lazy_static::lazy_static;
+use num_bigint::BigUint;
 use regex::Regex;
 
 use crate::hex::hex_to_decimal;
@@ -22,15 +23,32 @@ lazy_static! {
         Regex::new(r#"(?s)gate:\s*Gate\s*\{[^}]*?name:\s*"([^"]*)""#).unwrap();
     static ref RE_CELL_VALUE: Regex =
         Regex::new(r#"(?s)name:\s*"([^"]+)"[^"]*?,\s*"(0x[0-9a-fA-F]+)""#).unwrap();
+    static ref KNOWN_FIELD_PRIMES: Vec<BigUint> = vec![
+        BigUint::parse_bytes(
+            b"21888242871839275222246405745257275088548364400416034343698204186575808495617",
+            10,
+        )
+        .unwrap(),
+        BigUint::parse_bytes(
+            b"28948022309329048855892746252171976963363056481941647379679742748393362948097",
+            10,
+        )
+        .unwrap(),
+    ];
 }
 
 pub fn parse_failure(index: usize, failure: &VerifyFailure, tracker: &ZkWireTracker) -> ZkReport {
     let raw = format!("{:#?}", failure);
+    parse_raw_failure(index, &raw, tracker)
+}
+
+pub fn parse_raw_failure(index: usize, raw: &str, tracker: &ZkWireTracker) -> ZkReport {
     let error_type = detect_error_type(&raw);
     let location = extract_location(&raw);
     let value_found = extract_cell_values(&raw);
     let origin = lookup_origin(&location, tracker);
     let suggestion = build_suggestion(&error_type, &location);
+    let warnings = build_security_warnings(&value_found);
 
     ZkReport {
         index,
@@ -39,7 +57,8 @@ pub fn parse_failure(index: usize, failure: &VerifyFailure, tracker: &ZkWireTrac
         value_found,
         origin,
         suggestion,
-        raw,
+        warnings,
+        raw: raw.to_string(),
     }
 }
 
@@ -48,6 +67,7 @@ pub fn parse_failure(index: usize, failure: &VerifyFailure, tracker: &ZkWireTrac
 fn detect_error_type(raw: &str) -> ErrorType {
     // Take the leading PascalCase identifier (everything up to the first
     // non-ident character — typically a space or `{`).
+    let raw = raw.trim_start_matches(|c: char| !c.is_alphabetic());
     let head: String = raw
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -186,4 +206,36 @@ fn build_suggestion(et: &ErrorType, loc: &Location) -> String {
             s
         ),
     }
+}
+
+fn build_security_warnings(values: &[(String, String)]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (name, value) in values {
+        let Some(n) = BigUint::parse_bytes(value.as_bytes(), 10) else {
+            continue;
+        };
+
+        if n == BigUint::from(0u32) || n == BigUint::from(1u32) {
+            warnings.push(format!(
+                "Potential Boolean Constraint Weakness: `{}` is {}. Confirm this cell is explicitly boolean-constrained if it gates security logic.",
+                name, value
+            ));
+        }
+
+        if is_near_known_field_prime(&n) {
+            warnings.push(format!(
+                "Potential Underflow Detected: `{}` is within 1000 of a known field modulus. Check for subtraction underflow or missing range constraints.",
+                name
+            ));
+        }
+    }
+
+    warnings
+}
+
+fn is_near_known_field_prime(value: &BigUint) -> bool {
+    let window = BigUint::from(1000u32);
+    KNOWN_FIELD_PRIMES
+        .iter()
+        .any(|prime| value < prime && prime - value <= window)
 }

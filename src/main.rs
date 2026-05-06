@@ -1,243 +1,240 @@
-//! Demo: a tiny multiplication circuit, deliberately failed, run through
-//! `verify_and_forge`. The traceback should point at the exact line where the
-//! "bad" value was assigned via `zkwire_assign!`.
-
-use std::marker::PhantomData;
-use std::sync::Arc;
-
-use group::ff::Field;
-use halo2_proofs::{
-    circuit::{AssignedCell, Chip, Layouter, Region, SimpleFloorPlanner, Value},
-    plonk::{Advice, Circuit, Column, ConstraintSystem, Error, Fixed, Instance, Selector},
-    poly::Rotation,
+use std::{
+    any::Any,
+    io::{self, BufRead, Write},
+    panic,
+    process::ExitCode,
 };
 
-use zkwire::{ZkDebug, ZkWireTracker, zkwire_assign};
+use clap::{Parser, Subcommand};
+use colored::*;
+use zkwire::{AssignSite, ZkWireTracker, forge_report, forge_reports, parse_raw_failure};
 
-trait NumericInstructions<F: Field>: Chip<F> {
-    type Num;
+const DEMO_FAILURE: &str = include_str!("../fixtures/demo_failure.txt");
+const MAX_FAILURE_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-    fn load_private(&self, layouter: impl Layouter<F>, a: Value<F>) -> Result<Self::Num, Error>;
-    fn load_constant(&self, layouter: impl Layouter<F>, constant: F) -> Result<Self::Num, Error>;
-    fn mul(
-        &self,
-        layouter: impl Layouter<F>,
-        a: Self::Num,
-        b: Self::Num,
-    ) -> Result<Self::Num, Error>;
-    fn expose_public(
-        &self,
-        layouter: impl Layouter<F>,
-        num: Self::Num,
-        row: usize,
-    ) -> Result<(), Error>;
+#[derive(Debug, Parser)]
+#[command(
+    name = "zkwire",
+    version,
+    about = "Cargo-style diagnostics for Halo2 MockProver failures",
+    long_about = "ZkWire reads Halo2 VerifyFailure Debug dumps and turns them into clickable, Cargo-style diagnostics with decoded field elements and local layout context."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-struct FieldChip<F: Field> {
-    config: FieldConfig,
-    _marker: PhantomData<F>,
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Show a pre-baked ZkWire diagnostic without running a circuit.
+    Demo,
+    /// Read stdin and rewrite Halo2 VerifyFailure dumps as ZkWire reports.
+    Explain {
+        /// Emit a machine-readable JSON array instead of terminal diagnostics.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
-#[derive(Clone, Debug)]
-struct FieldConfig {
-    advice: [Column<Advice>; 2],
-    instance: Column<Instance>,
-    s_mul: Selector,
+fn main() -> ExitCode {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        if !is_broken_pipe_payload(info.payload()) {
+            default_hook(info);
+        }
+    }));
+
+    match panic::catch_unwind(run_cli) {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Ok(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Ok(Err(err)) => {
+            eprintln!("zkwire: {}", err);
+            ExitCode::FAILURE
+        }
+        Err(payload) if is_broken_pipe_payload(payload.as_ref()) => ExitCode::SUCCESS,
+        Err(payload) => panic::resume_unwind(payload),
+    }
 }
 
-impl<F: Field> FieldChip<F> {
-    fn construct(config: <Self as Chip<F>>::Config) -> Self {
+fn run_cli() -> io::Result<()> {
+    match Cli::parse().command {
+        Command::Demo => run_demo(),
+        Command::Explain { json } => run_explain(json),
+    }
+}
+
+fn is_broken_pipe_payload(payload: &(dyn Any + Send)) -> bool {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied());
+
+    message.is_some_and(|message| {
+        message.contains("Broken pipe") || message.contains("failed printing to stdout")
+    })
+}
+
+fn run_demo() -> io::Result<()> {
+    let tracker = demo_tracker();
+    let report = parse_raw_failure(1, DEMO_FAILURE, &tracker);
+
+    println!(
+        "{} {}",
+        "ZkWire demo:".bold().bright_magenta(),
+        "hardcoded Halo2 failure rendered as a source-linked diagnostic".bright_black()
+    );
+    forge_reports(&[report], &tracker);
+    Ok(())
+}
+
+fn run_explain(json: bool) -> io::Result<()> {
+    let tracker = ZkWireTracker::new();
+    let stdin = io::stdin();
+    let mut scanner = FailureScanner::new(&tracker, json);
+
+    if json {
+        print!("[");
+        io::stdout().flush()?;
+    }
+
+    for line in stdin.lock().lines() {
+        scanner.push_line(&line?)?;
+    }
+    scanner.finish()
+}
+
+fn demo_tracker() -> ZkWireTracker {
+    let tracker = ZkWireTracker::new();
+    tracker.record(AssignSite {
+        region: "broken fibonacci".to_string(),
+        offset: 8,
+        column_index: 2,
+        column_name: "fib(c) intentionally wrong".to_string(),
+        expression: "a + b + 1".to_string(),
+        file: "examples/broken_fibonacci.rs",
+        line: 74,
+    });
+    tracker
+}
+
+struct FailureScanner<'a> {
+    tracker: &'a ZkWireTracker,
+    buffer: String,
+    brace_depth: isize,
+    collecting: bool,
+    next_index: usize,
+    json: bool,
+    first_json_report: bool,
+}
+
+impl<'a> FailureScanner<'a> {
+    fn new(tracker: &'a ZkWireTracker, json: bool) -> Self {
         Self {
-            config,
-            _marker: PhantomData,
+            tracker,
+            buffer: String::new(),
+            brace_depth: 0,
+            collecting: false,
+            next_index: 1,
+            json,
+            first_json_report: true,
         }
     }
 
-    fn configure(
-        meta: &mut ConstraintSystem<F>,
-        advice: [Column<Advice>; 2],
-        instance: Column<Instance>,
-        constant: Column<Fixed>,
-    ) -> <Self as Chip<F>>::Config {
-        meta.enable_equality(instance);
-        meta.enable_constant(constant);
-        for column in &advice {
-            meta.enable_equality(*column);
+    fn push_line(&mut self, line: &str) -> io::Result<()> {
+        if self.collecting {
+            self.push_failure_line(line);
+            if self.buffer.len() > MAX_FAILURE_BUFFER_BYTES {
+                self.abort_collection()?;
+                return Ok(());
+            }
+            if self.brace_depth <= 0 {
+                self.flush_report()?;
+            }
+            return Ok(());
         }
-        let s_mul = meta.selector();
 
-        meta.create_gate("mul", |meta| {
-            let lhs = meta.query_advice(advice[0], Rotation::cur());
-            let rhs = meta.query_advice(advice[1], Rotation::cur());
-            let out = meta.query_advice(advice[0], Rotation::next());
-            let s_mul = meta.query_selector(s_mul);
-            vec![s_mul * (lhs * rhs - out)]
-        });
-
-        FieldConfig {
-            advice,
-            instance,
-            s_mul,
+        if is_failure_start(line) {
+            self.collecting = true;
+            self.push_failure_line(line);
+            if self.buffer.len() > MAX_FAILURE_BUFFER_BYTES {
+                self.abort_collection()?;
+                return Ok(());
+            }
+            if self.brace_depth <= 0 {
+                self.flush_report()?;
+            }
+        } else if !self.json {
+            println!("{}", line);
+            io::stdout().flush()?;
         }
+
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        if self.collecting && !self.buffer.trim().is_empty() {
+            self.flush_report()?;
+        }
+        if self.json {
+            println!("]");
+        }
+        io::stdout().flush()
+    }
+
+    fn push_failure_line(&mut self, line: &str) {
+        self.brace_depth += brace_delta(line);
+        self.buffer.push_str(line);
+        self.buffer.push('\n');
+    }
+
+    fn flush_report(&mut self) -> io::Result<()> {
+        let report = parse_raw_failure(self.next_index, &self.buffer, self.tracker);
+        if self.json {
+            let mut stdout = io::stdout();
+            if self.first_json_report {
+                self.first_json_report = false;
+            } else {
+                write!(stdout, ",")?;
+            }
+            serde_json::to_writer(&mut stdout, &report).map_err(io::Error::other)?;
+            stdout.flush()?;
+        } else {
+            forge_report(&report);
+        }
+        self.next_index += 1;
+        self.buffer.clear();
+        self.brace_depth = 0;
+        self.collecting = false;
+        Ok(())
+    }
+
+    fn abort_collection(&mut self) -> io::Result<()> {
+        if !self.json {
+            print!("{}", self.buffer);
+            io::stdout().flush()?;
+        }
+        self.buffer.clear();
+        self.brace_depth = 0;
+        self.collecting = false;
+        Ok(())
     }
 }
 
-impl<F: Field> Chip<F> for FieldChip<F> {
-    type Config = FieldConfig;
-    type Loaded = ();
-
-    fn config(&self) -> &Self::Config {
-        &self.config
-    }
-    fn loaded(&self) -> &Self::Loaded {
-        &()
-    }
+fn is_failure_start(line: &str) -> bool {
+    let trimmed = line.trim_start_matches(|c: char| c == '[' || c == ',' || c.is_whitespace());
+    [
+        "ConstraintNotSatisfied",
+        "Permutation",
+        "InstanceCellNotAssigned",
+        "CellNotAssigned",
+        "Lookup",
+    ]
+    .iter()
+    .any(|variant| trimmed.starts_with(variant))
 }
 
-#[derive(Clone)]
-struct Number<F: Field>(AssignedCell<F, F>);
-
-impl<F: Field> NumericInstructions<F> for FieldChip<F> {
-    type Num = Number<F>;
-
-    fn load_private(
-        &self,
-        mut layouter: impl Layouter<F>,
-        value: Value<F>,
-    ) -> Result<Self::Num, Error> {
-        let config = self.config();
-        layouter.assign_region(
-            || "load private",
-            |mut region| {
-                region
-                    .assign_advice(|| "private input", config.advice[0], 0, || value)
-                    .map(Number)
-            },
-        )
-    }
-
-    fn load_constant(
-        &self,
-        mut layouter: impl Layouter<F>,
-        constant: F,
-    ) -> Result<Self::Num, Error> {
-        let config = self.config();
-        layouter.assign_region(
-            || "load constant",
-            |mut region| {
-                region
-                    .assign_advice_from_constant(|| "constant value", config.advice[0], 0, constant)
-                    .map(Number)
-            },
-        )
-    }
-
-    fn mul(
-        &self,
-        mut layouter: impl Layouter<F>,
-        a: Self::Num,
-        b: Self::Num,
-    ) -> Result<Self::Num, Error> {
-        let config = self.config();
-        layouter.assign_region(
-            || "mul",
-            |mut region: Region<'_, F>| {
-                config.s_mul.enable(&mut region, 0)?;
-
-                a.0.copy_advice(|| "lhs", &mut region, config.advice[0], 0)?;
-                b.0.copy_advice(|| "rhs", &mut region, config.advice[1], 0)?;
-
-                let value = a.0.value().copied() * b.0.value();
-
-                // ↓↓↓ This is the line ZkWire will surface in the traceback. ↓↓↓
-                zkwire_assign!(region, "mul", "lhs * rhs", config.advice[0], 1, value).map(Number)
-            },
-        )
-    }
-
-    fn expose_public(
-        &self,
-        mut layouter: impl Layouter<F>,
-        num: Self::Num,
-        row: usize,
-    ) -> Result<(), Error> {
-        let config = self.config();
-        layouter.constrain_instance(num.0.cell(), config.instance, row)
-    }
-}
-
-#[derive(Default)]
-struct MyCircuit<F: Field> {
-    constant: F,
-    a: Value<F>,
-    b: Value<F>,
-}
-
-impl<F: Field> Circuit<F> for MyCircuit<F> {
-    type Config = FieldConfig;
-    type FloorPlanner = SimpleFloorPlanner;
-
-    fn without_witnesses(&self) -> Self {
-        Self::default()
-    }
-
-    fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        let advice = [meta.advice_column(), meta.advice_column()];
-        let instance = meta.instance_column();
-        let constant = meta.fixed_column();
-        FieldChip::configure(meta, advice, instance, constant)
-    }
-
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        mut layouter: impl Layouter<F>,
-    ) -> Result<(), Error> {
-        let field_chip = FieldChip::<F>::construct(config);
-
-        let a = field_chip.load_private(layouter.namespace(|| "load a"), self.a)?;
-        let b = field_chip.load_private(layouter.namespace(|| "load b"), self.b)?;
-        let constant =
-            field_chip.load_constant(layouter.namespace(|| "load constant"), self.constant)?;
-
-        let ab = field_chip.mul(layouter.namespace(|| "a * b"), a, b)?;
-        let absq = field_chip.mul(layouter.namespace(|| "ab * ab"), ab.clone(), ab)?;
-        let c = field_chip.mul(layouter.namespace(|| "constant * absq"), constant, absq)?;
-
-        field_chip.expose_public(layouter.namespace(|| "expose c"), c, 0)
-    }
-}
-
-fn main() {
-    use halo2_proofs::{dev::MockProver, pasta::Fp};
-
-    let k = 4;
-    let constant = Fp::from(7);
-    let a = Fp::from(2);
-    let b = Fp::from(3);
-    let c = constant * a.square() * b.square();
-
-    let circuit = MyCircuit {
-        constant,
-        a: Value::known(a),
-        b: Value::known(b),
-    };
-
-    // 1. Initialize the tracker and install it for the duration of synthesis.
-    let tracker = Arc::new(ZkWireTracker::new());
-    let _guard = ZkWireTracker::install(&tracker);
-
-    // 2. Sanity check: the correct public input verifies cleanly.
-    let ok_inputs = vec![c];
-    let prover = MockProver::run(k, &circuit, vec![ok_inputs.clone()]).unwrap();
-    assert_eq!(prover.verify(), Ok(()));
-
-    // 3. Force a failure with a wrong public input, and let `verify_and_forge`
-    //    do the rest. The tracker also captures the public inputs so the
-    //    reporter can show them without `prover.instance()`.
-    let wrong_inputs = vec![Fp::from(999u64)];
-    tracker.record_public_inputs(&wrong_inputs);
-
-    let prover = MockProver::run(k, &circuit, vec![wrong_inputs.clone()]).unwrap();
-    let _ = prover.verify_and_forge(&tracker);
+fn brace_delta(line: &str) -> isize {
+    let opens = line.chars().filter(|c| *c == '{').count() as isize;
+    let closes = line.chars().filter(|c| *c == '}').count() as isize;
+    opens - closes
 }

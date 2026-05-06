@@ -1,179 +1,198 @@
 # ZkWire
 
-A debugging layer for Halo2 circuits. Maps cryptic `VerifyFailure` dumps to `file:line` traces in your Rust source, decodes 256-bit field elements to integers, and renders the result like a Cargo error.
+**From cryptic field elements to source-linked Halo2 diagnostics.**
 
-`gdb` is to a segfault as ZkWire is to a `Permutation` failure.
+ZkWire is a unified CLI and Rust SDK for Halo2 circuit auditing. It turns raw `MockProver` / `VerifyFailure` dumps into readable reports with decoded field values, source snippets, semantic labels, and security-focused warnings.
 
-> **Status**: alpha. Public API is stable for the patterns documented below; internals may shift before 0.2.
+Built for ZK researchers who need to move fast without losing audit-grade context.
 
-## The pain
+## Demo
 
-When a Halo2 circuit refuses to verify, you get this:
+Run the built-in demo:
+
+```bash
+zkwire demo
+```
+
+The demo renders a pre-baked Halo2 constraint failure as a Cargo-style diagnostic:
 
 ```text
-[
-    Permutation {
-        column: Column { index: 0, column_type: Instance },
-        location: InRegion {
-            region: Region { index: 7, name: "expose c" },
-            offset: 0,
-        },
-    },
-    Permutation {
-        column: Column { index: 0, column_type: Advice },
-        location: InRegion {
-            region: Region { index: 5, name: "mul" },
-            offset: 1,
-        },
-    },
-]
+error[01]: gate constraint not satisfied
+  --> region `broken fibonacci`  ·  offset 8  ·  Advice column #2  ·  gate `fibonacci step`
+  = layout: broken fibonacci around offset 8
+    ┌─────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+    │ row │ Advice 0 │ Advice 1 │ Advice 2 │ Advice 3 │ Advice 4 │
+    ├─────┼──────────┼──────────┼──────────┼──────────┼──────────┤
+    │  6  │    ·     │    ·     │    ·     │    ·     │    ·     │
+    │  7  │    ·     │    ·     │    ·     │    ·     │    ·     │
+    │  8  │    1     │    1     │    3     │    ·     │    ·     │
+    │  9  │    ·     │    ·     │    ·     │    ·     │    ·     │
+    │ 10  │    ·     │    ·     │    ·     │    ·     │    ·     │
+    └─────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+  values found
+    │ fib(a) = 1
+    │ fib(b) = 1
+    │ fib(c) = 3 (from expression: a + b + 1)
+  = note: value first assigned at ./examples/broken_fibonacci.rs:74:1  (annotation `fib(c) intentionally wrong`)
+  source context
+    --> ./examples/broken_fibonacci.rs:74:1
+    │
+       72 │                     Value::known(Fp::from(1)),
+       73 │                 )?;
+    >  74 │                 zkwire_assign!(
+       75 │                     region,
+       76 │                     "broken fibonacci",
+  = warning: Potential Boolean Constraint Weakness: `fib(a)` is 1. Confirm this cell is explicitly boolean-constrained if it gates security logic.
+  = warning: Potential Boolean Constraint Weakness: `fib(b)` is 1. Confirm this cell is explicitly boolean-constrained if it gates security logic.
+  = help: Gate `fibonacci step` failed in region `broken fibonacci` at offset 8. The witness violates the gate's algebra — recompute the gate by hand using the cell values shown.
 ```
 
-For a `ConstraintNotSatisfied`, every `cell_values` field is a 64-character hex string — `0x0000000000000000000000000000000000000000000000000000000000000007` instead of `7`. You tab between your circuit and a hex calculator while the deadline slips.
+What this gives you:
 
-`MockProver` makes it worse: `instance()` is `pub(crate)`, `VerifyFailure`'s fields are private, and patching halo2 means forking a critical dependency. There is no supported way to extract context.
+- A 5x5 local view of the Halo2 table around the failing offset.
+- Field elements decoded from 256-bit hex into decimal using `BigUint`.
+- A clickable `file:line:column` source link.
+- The surrounding Rust source code injected into the terminal.
+- Semantic context from the Rust expression that assigned the value.
+- Early security heuristics for underflows and boolean-like values.
 
-ZkWire solves all three problems:
+## Features
 
-- **Origin tracking** — the `zkwire_assign!` macro records `(file!(), line!())` at every cell assignment. When verification fails, the report points at the exact line where the offending value was written. A stack trace, but for advice columns.
-- **Field-element decoding** — `BigUint`-backed conversion turns `0x00…03e7` into `999`. Works for Pasta `Fp`, BN-254 `Fr`, Goldilocks, or any `F: Debug`. No `u128` truncation.
-- **Non-invasive** — everything goes through `format!("{:#?}", failure)`. No fork of `halo2_proofs`, no private fields, no `unsafe`.
+### Source-To-Terminal Injection
 
-## Before / After
+ZkWire reads the tracked source file and prints the failing line plus two lines above and below it.
 
-**Before** — the raw `unwrap_err` you get today:
+No detached debugger. No guessing which assignment produced the witness value. The source appears inside the diagnostic stream.
 
-```text
-[
-    Permutation {
-        column: Column { index: 0, column_type: Instance },
-        location: InRegion { region: Region { index: 7, name: "expose c" }, offset: 0 },
-    },
-    Permutation {
-        column: Column { index: 0, column_type: Advice },
-        location: InRegion { region: Region { index: 5, name: "mul" }, offset: 1 },
-    },
-]
+### Semantic Context
+
+Use `zkwire_assign!` where you assign advice cells:
+
+```rust
+zkwire_assign!(
+    region,
+    "broken fibonacci",
+    "fib(c)",
+    config.advice[2],
+    0,
+    Value::known(a + b + Fp::one()),
+)?;
 ```
 
-**After** — `prover.verify_and_forge(&tracker)`:
+The macro records:
 
-```text
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- ZkWire   2 circuit failures detected
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Region label.
+- Advice column index, reflected from Halo2 `Debug` output.
+- Offset.
+- Source `file!()` and `line!()`.
+- Human annotation.
+- Rust expression via `stringify!`.
 
- public inputs (as passed to MockProver)
-   [0] 999   raw: 0x00000000000000000000000000000000000000000000000000000000000003e7
+Reports can then explain not just where a value was assigned, but what expression produced it.
 
-error[01]: public input mismatch
-  --> Instance column
-  = help: Public input passed to `MockProver::run` doesn't match what the
-          circuit exposes via `expose_public`. Print both sides and confirm
-          equality.
+### Security Auditing
 
-error[02]: permutation / copy mismatch
-  --> region `mul`  ·  offset 1  ·  Advice column
-  = note: value first assigned at src/main.rs:142  (cell `lhs * rhs`)
-  = help: Two cells linked by an equality constraint hold different values.
-          Trace the `copy_advice` chain that produced these cells.
+ZkWire includes alpha-stage heuristics for common ZK footguns:
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- tip: rerun after addressing the suggestions above.
+- **Potential Underflow Detected** when a decoded value is close to a known field modulus.
+- **Potential Boolean Constraint Weakness** when a value is `0` or `1` and may require explicit boolean constraints.
+
+These warnings are intentionally conservative. They are audit prompts, not proofs of vulnerability.
+
+### Stream Processing
+
+ZkWire is designed for log streams.
+
+```bash
+cargo test | zkwire explain
 ```
 
-The `= note:` line is rust-compiler-style. Most modern terminals (iTerm2, WezTerm, VS Code) make `src/main.rs:142` clickable — Cmd/Ctrl-click jumps your editor to the assignment site.
+`explain` reads stdin line-by-line, buffers only the current brace-balanced `VerifyFailure`, and emits diagnostics as soon as each failure block is complete. This keeps memory usage stable on large logs.
 
-## Install
+For CI and auditing scripts:
 
-```toml
-[dependencies]
-zkwire = "0.1"
-halo2_proofs = "0.3"
+```bash
+cargo test | zkwire explain --json > zkwire-report.json
 ```
 
-## Quick start
+JSON mode emits a machine-readable array of detected failures and suppresses unrelated log lines.
 
-Three lines wire ZkWire into an existing test:
+## Installation
+
+```bash
+cargo install zkwire
+```
+
+Requires Rust 1.85+.
+
+## Workflow
+
+Run the demo:
+
+```bash
+zkwire demo
+```
+
+Explain test output:
+
+```bash
+cargo test | zkwire explain
+```
+
+Export CI-readable JSON:
+
+```bash
+cargo test | zkwire explain --json > audit.json
+```
+
+Use as a Rust SDK inside tests:
 
 ```rust
 use std::sync::Arc;
 use zkwire::{ZkDebug, ZkWireTracker};
 
 let tracker = Arc::new(ZkWireTracker::new());
-let _guard = ZkWireTracker::install(&tracker);           // RAII; uninstalls on drop
-tracker.record_public_inputs(&public_inputs);
+let _guard = ZkWireTracker::install(&tracker);
 
-let prover = MockProver::run(k, &circuit, vec![public_inputs.clone()]).unwrap();
-let _ = prover.verify_and_forge(&tracker);               // prints the report on failure
+let prover = MockProver::run(k, &circuit, public_inputs).unwrap();
+let _ = prover.verify_and_forge(&tracker);
 ```
 
-That's it. Existing circuits get readable diagnostics without any structural change.
+## Technical Stack
 
-## Tracking origins
+- **Rust**: 1.85+, Edition 2024.
+- **Circuit framework**: Halo2 `MockProver` diagnostics.
+- **Parsing**: Regex-based string reflection over public `Debug` output. No private Halo2 APIs.
+- **Field decoding**: `num-bigint::BigUint` for 256-bit field elements without truncation.
+- **CLI**: `clap` derive API.
+- **Terminal output**: `colored` with Cargo-style `error`, `note`, `warning`, and `help` lines.
+- **CI output**: `serde` / `serde_json`.
 
-To map failures back to source lines, swap `region.assign_advice(...)` for `zkwire_assign!`:
+## Why String Reflection?
+
+Halo2 does not expose all `VerifyFailure` internals as stable public fields. ZkWire deliberately avoids private APIs, unsafe layout assumptions, and Halo2 forks.
+
+Instead, it parses the public `Debug` representation:
 
 ```rust
-use zkwire::zkwire_assign;
-
-layouter.assign_region(
-    || "mul",
-    |mut region| {
-        config.s_mul.enable(&mut region, 0)?;
-
-        a.copy_advice(|| "lhs", &mut region, advice[0], 0)?;
-        b.copy_advice(|| "rhs", &mut region, advice[1], 0)?;
-
-        let value = a.value().copied() * b.value();
-
-        zkwire_assign!(
-            region,           // &mut Region
-            "mul",            // region name (must match the assign_region label)
-            "lhs * rhs",      // assignment annotation
-            advice[0],        // Column<Advice>
-            1,                // offset within the region
-            value             // Value<F>
-        )
-    },
-)
+format!("{:#?}", failure)
 ```
 
-When verification fails on a cell linked to that assignment, the report's `= note:` points back at the `zkwire_assign!` call site. The macro is a transparent wrapper — when no tracker is installed, it is a single thread-local read followed by an early return.
+This is not as clean as a first-class Halo2 diagnostics API, but it is portable, auditable, and works with stock `halo2_proofs`.
 
-## Features
+## Status
 
-- **RAII tracker installation** — `ZkWireTracker::install` returns a `TrackerGuard` keyed on a thread-local. Drop the guard, the tracker uninstalls. Safe across nested scopes and parallel test runs.
-- **Near-zero overhead when uninstalled** — production builds that don't install a tracker pay one thread-local read per `zkwire_assign!`. No global state, no allocation.
-- **Field-agnostic hex decoding** — `BigUint` (no `u128` truncation). Field elements up to 256 bits — Pasta, BN-254, Goldilocks — all decode the same way.
-- **Double-anchored parser** — brace-balanced slicing isolates the `cell_values: [ … ]` block; regex extraction runs *inside* that slice. Prevents cross-contamination from unrelated `name:` fields elsewhere in the dump. See [Architecture.md](Architecture.md).
-- **Cargo-style diagnostics** — `error[NN]`, `-->` location lines, `= note:` for source origin, `= help:` for actionable guidance. Color via the `colored` crate.
-- **Generic `ZkDebug` trait** — `impl<F> ZkDebug<F> for MockProver<F> where F: PrimeField + FromUniformBytes<64> + Ord`. Works for any field MockProver supports.
-- **No fork required** — works with stock `halo2_proofs` 0.3.0+ via `format!("{:#?}", failure)` reflection.
+ZkWire is early-stage security tooling.
 
-## How it works
+The current focus is high-signal debugging for Halo2 circuits:
 
-See [Architecture.md](Architecture.md) for the parser design, the shadow-mapping strategy that links failure dumps back to source lines, and the rationale for "string reflection" over private-field access.
+- Better failure localization.
+- Better source context.
+- Better field-element readability.
+- Better audit prompts.
 
-## Compatibility
-
-|              | Versions                                                        |
-|--------------|-----------------------------------------------------------------|
-| halo2_proofs | `0.3.0`+ (tested against `0.3.2`)                               |
-| Rust         | `1.85` (edition 2024)                                           |
-| Fields       | any `F: PrimeField + FromUniformBytes<64> + Ord` — Pasta, BN-254, Goldilocks |
-
-## Roadmap
-
-- First-class support for `halo2_axiom` and `pse-halo2` failure shapes
-- JSON output mode for CI integration
-- Visual cell-grid renderer (a la Chrome DevTools' DOM inspector)
-- Coverage map: which gates fired, which didn't
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Parser improvements, new framework backends, and reproductions of unhandled `VerifyFailure` shapes are all welcome.
+Expect the heuristics and report schema to evolve as more real-world failure shapes are collected.
 
 ## License
 
-[MIT](LICENSE).
+MIT.

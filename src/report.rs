@@ -1,8 +1,9 @@
 //! Structured representation of a circuit failure.
 
 use crate::tracker::AssignSite;
+use serde::Serialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ErrorType {
     /// A polynomial gate identity was violated.
     ConstraintViolation,
@@ -18,7 +19,7 @@ pub enum ErrorType {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Location {
     pub region: Option<String>,
     pub offset: Option<usize>,
@@ -27,7 +28,7 @@ pub struct Location {
     pub gate: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ZkReport {
     pub index: usize,
     pub error_type: ErrorType,
@@ -38,6 +39,7 @@ pub struct ZkReport {
     /// `(region, offset, column)` was recorded via `zkwire_assign!`.
     pub origin: Option<AssignSite>,
     pub suggestion: String,
+    pub warnings: Vec<String>,
     /// The original `{:#?}`-formatted failure, kept for fall-through inspection.
     pub raw: String,
 }

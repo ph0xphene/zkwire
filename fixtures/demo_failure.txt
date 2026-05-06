@@ -1,0 +1,56 @@
+ConstraintNotSatisfied {
+    column: Column {
+        index: 2,
+        column_type: Advice,
+    },
+    constraint: Constraint {
+        gate: Gate {
+            index: 0,
+            name: "fibonacci step",
+        },
+        index: 0,
+        name: "a + b = c",
+    },
+    location: InRegion {
+        region: Region {
+            index: 3,
+            name: "broken fibonacci",
+        },
+        offset: 8,
+    },
+    cell_values: [
+        (
+            VirtualCell {
+                name: "fib(a)",
+                column: Column {
+                    index: 0,
+                    column_type: Advice,
+                },
+                rotation: Rotation(0),
+            },
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        ),
+        (
+            VirtualCell {
+                name: "fib(b)",
+                column: Column {
+                    index: 1,
+                    column_type: Advice,
+                },
+                rotation: Rotation(0),
+            },
+            "0x0000000000000000000000000000000000000000000000000000000000000001",
+        ),
+        (
+            VirtualCell {
+                name: "fib(c)",
+                column: Column {
+                    index: 2,
+                    column_type: Advice,
+                },
+                rotation: Rotation(0),
+            },
+            "0x0000000000000000000000000000000000000000000000000000000000000003",
+        ),
+    ],
+}

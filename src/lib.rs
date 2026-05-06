@@ -15,14 +15,14 @@ pub mod report;
 pub mod reporter;
 pub mod tracker;
 
-pub use parser::parse_failure;
+pub use parser::{parse_failure, parse_raw_failure};
 pub use report::{ErrorType, Location, ZkReport};
-pub use reporter::forge_trace;
+pub use reporter::{forge_report, forge_reports, forge_trace};
 pub use tracker::{AssignKey, AssignSite, TrackerGuard, ZkDebug, ZkWireTracker};
 
 pub mod prelude {
     pub use crate::{
-        ErrorType, Location, TrackerGuard, ZkDebug, ZkReport, ZkWireTracker, forge_trace,
-        parse_failure, zkwire_assign,
+        ErrorType, Location, TrackerGuard, ZkDebug, ZkReport, ZkWireTracker, forge_report,
+        forge_reports, forge_trace, parse_failure, parse_raw_failure, zkwire_assign,
     };
 }

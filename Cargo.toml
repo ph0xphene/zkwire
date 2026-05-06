@@ -2,6 +2,13 @@
 name = "zkwire"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+description = "Cargo-style diagnostics and source-origin tracking for Halo2 MockProver failures"
+license = "MIT"
+repository = "https://github.com/merelinmrelin-web/zkwire"
+readme = "README.md"
+keywords = ["halo2", "zk", "debugging", "cli", "diagnostics"]
+categories = ["command-line-utilities", "development-tools::debugging"]
 
 [lib]
 name = "zkwire"
@@ -19,3 +26,6 @@ colored = "2"
 num-bigint = "0.4"
 lazy_static = "1"
 ff = "0.13"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

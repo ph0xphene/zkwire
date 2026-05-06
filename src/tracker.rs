@@ -9,6 +9,7 @@
 //! so chips don't need to thread a parameter through every method.
 
 use halo2_proofs::dev::{MockProver, VerifyFailure};
+use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,19 +19,20 @@ use crate::reporter::forge_trace;
 
 // ─── Records ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize)]
 pub struct AssignKey {
     pub region: String,
     pub offset: usize,
     pub column_index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AssignSite {
     pub region: String,
     pub offset: usize,
     pub column_index: usize,
     pub column_name: String,
+    pub expression: String,
     pub file: &'static str,
     pub line: u32,
 }
@@ -210,6 +212,7 @@ macro_rules! zkwire_assign {
                 offset: __offset,
                 column_index: $crate::tracker::column_index(&__column),
                 column_name: __column_name.to_string(),
+                expression: stringify!($value).to_string(),
                 file: file!(),
                 line: line!(),
             });
